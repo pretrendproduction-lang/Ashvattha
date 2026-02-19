@@ -3,39 +3,34 @@ import httpx
 import re
 import logging
 from typing import Optional, Dict, List
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger("ashvattha_agent")
 logging.basicConfig(level=logging.INFO)
 
-# ── DATA SOURCES ──────────────────────────────────────────────────────────────
 WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 WIKIPEDIA_API   = "https://en.wikipedia.org/w/api.php"
 DBPEDIA_SPARQL  = "https://dbpedia.org/sparql"
-WIKISOURCE_API  = "https://en.wikisource.org/w/api.php"
-THEOI_BASE      = "https://www.theoi.com"
-SACRED_TEXTS    = "https://www.sacred-texts.com"
 
-REQUEST_DELAY  = 5    # seconds between persons
-RETRY_DELAY    = 90   # seconds when rate limited
-MAX_ATTEMPTS   = 5
+REQUEST_DELAY = 5
+RETRY_DELAY   = 90
+MAX_ATTEMPTS  = 5
 
 CATEGORY_KEYWORDS = {
-    "Greek Gods":        ["greek god", "olympian", "greek deity", "theoi"],
-    "Norse Gods":        ["norse god", "asgard", "viking god", "eddic"],
-    "Hindu Deities":     ["hindu god", "hindu deity", "vedic god", "devanagari"],
-    "Egyptian Gods":     ["egyptian god", "egyptian deity", "ancient egyptian god"],
-    "Roman Gods":        ["roman god", "roman deity"],
-    "Mesopotamian Gods": ["sumerian god", "babylonian god", "akkadian"],
-    "Celtic Gods":       ["celtic god", "celtic deity", "druid"],
-    "Aztec Gods":        ["aztec god", "aztec deity", "mesoamerican god"],
+    "Greek Gods":        ["greek god", "olympian", "greek deity", "greek mytholog"],
+    "Norse Gods":        ["norse god", "asgard", "viking god", "norse mytholog"],
+    "Hindu Deities":     ["hindu god", "hindu deity", "vedic god", "hinduism"],
+    "Egyptian Gods":     ["egyptian god", "egyptian deity", "ancient egyptian religion"],
+    "Roman Gods":        ["roman god", "roman deity", "roman mytholog"],
+    "Mesopotamian Gods": ["sumerian god", "babylonian god", "akkadian", "mesopotamian"],
+    "Celtic Gods":       ["celtic god", "celtic deity", "irish mytholog"],
+    "Aztec Gods":        ["aztec god", "aztec deity", "mesoamerican"],
     "Egyptian Pharaohs": ["pharaoh", "king of egypt", "ancient egypt"],
-    "Roman Emperors":    ["roman emperor", "emperor of rome", "caesar"],
-    "Greek Kings":       ["king of macedon", "king of sparta", "king of athens"],
+    "Roman Emperors":    ["roman emperor", "emperor of rome"],
+    "Greek Kings":       ["king of macedon", "king of sparta", "king of athens", "king of greece"],
     "Sumerian Kings":    ["king of sumer", "sumerian king", "king of ur"],
     "Persian Kings":     ["king of persia", "achaemenid", "sassanid"],
-    "Biblical Figures":  ["biblical", "old testament", "new testament", "patriarch", "prophet"],
+    "Biblical Figures":  ["biblical", "old testament", "new testament", "patriarch", "prophet of"],
     "Quranic Figures":   ["quran", "islamic prophet", "companion of the prophet"],
     "Vedic Figures":     ["vedic", "rigveda", "upanishad"],
     "British Royals":    ["king of england", "queen of england", "british royal", "house of windsor"],
@@ -44,10 +39,25 @@ CATEGORY_KEYWORDS = {
     "Ottoman Dynasty":   ["ottoman sultan", "sultan of the ottoman"],
     "Americans":         ["american president", "united states president", "founding father"],
     "South Asians":      ["prime minister of india", "indian ruler", "maharaja"],
-    "Notable Families":  ["dynasty", "noble family", "aristocratic family"],
 }
 
-# ── SEED PERSONS ──────────────────────────────────────────────────────────────
+# Explicit type→category mapping for seeded persons
+# so they get categorized immediately at seed time
+TYPE_CATEGORY_MAP = {
+    "Zeus":                 ["Greek Gods", "Mythological"],
+    "Odin":                 ["Norse Gods", "Mythological"],
+    "Brahma":               ["Hindu Deities", "Mythological"],
+    "Osiris":               ["Egyptian Gods", "Mythological"],
+    "Adam":                 ["Biblical Figures", "Religion & Scripture"],
+    "Abraham":              ["Biblical Figures", "Religion & Scripture"],
+    "Muhammad":             ["Quranic Figures", "Religion & Scripture"],
+    "Ramesses II":          ["Egyptian Pharaohs", "Ancient"],
+    "Alexander the Great":  ["Greek Kings", "Ancient"],
+    "Julius Caesar":        ["Roman Emperors", "Ancient"],
+    "Genghis Khan":         ["Mongol Khans", "Royalty & Dynasties"],
+    "Charlemagne":          ["Medieval", "Royalty & Dynasties"],
+}
+
 SEEDS = [
     ("Zeus","mythological"), ("Adam","human"), ("Abraham","human"),
     ("Ramesses II","human"), ("Alexander the Great","human"),
@@ -58,44 +68,23 @@ SEEDS = [
 ]
 
 EXPANSION_SEEDS = [
-    # Biblical lineage — extremely well connected
     ("Noah","human"), ("Isaac","human"), ("Jacob","human"),
-    ("Joseph son of Jacob","human"), ("Moses","human"),
-    ("King David","human"), ("Solomon","human"),
-    # Greek mythology — massive family trees
+    ("Moses","human"), ("King David","human"), ("Solomon","human"),
     ("Cronus","mythological"), ("Uranus","mythological"),
     ("Heracles","mythological"), ("Apollo","mythological"),
-    ("Achilles","human"), ("Odysseus","human"), ("Aeneas","human"),
-    # Hindu — deep lineages
-    ("Brahma","mythological"), ("Vishnu","mythological"),
-    ("Krishna","mythological"), ("Rama","mythological"),
-    ("Manu","mythological"),
-    # Norse
+    ("Achilles","human"), ("Odysseus","human"),
     ("Thor","mythological"), ("Loki","mythological"),
-    ("Freyr","mythological"), ("Baldr","mythological"),
-    # Egyptian
     ("Ra","mythological"), ("Horus","mythological"),
-    ("Set","mythological"), ("Thoth","mythological"),
-    # Ancient rulers — well documented
     ("Cyrus the Great","human"), ("Darius I","human"),
     ("Tutankhamun","human"), ("Cleopatra","human"),
     ("Ashoka","human"), ("Chandragupta Maurya","human"),
     ("Attila the Hun","human"), ("Saladin","human"),
     ("Suleiman the Magnificent","human"), ("Akbar","human"),
-    ("Timur","human"), ("Babur","human"),
-    # Medieval Europe
-    ("William the Conqueror","human"), ("Henry II of England","human"),
-    ("Henry VIII","human"), ("Queen Elizabeth I","human"),
+    ("William the Conqueror","human"), ("Henry VIII","human"),
     ("Louis XIV","human"), ("Napoleon Bonaparte","human"),
-    ("Frederick the Great","human"), ("Peter the Great","human"),
-    ("Ivan the Terrible","human"), ("Vlad the Impaler","human"),
-    # East Asia
-    ("Qin Shi Huang","human"), ("Kublai Khan","human"),
-    ("Emperor Meiji","human"),
-    # Americas
-    ("Moctezuma II","human"), ("Pachacuti","human"),
-    # Romulus — connects to Roman mythology
-    ("Romulus","human"), ("Remus","human"),
+    ("Peter the Great","human"), ("Qin Shi Huang","human"),
+    ("Kublai Khan","human"), ("Krishna","mythological"),
+    ("Rama","mythological"), ("Vishnu","mythological"),
 ]
 
 
@@ -109,19 +98,17 @@ class GenesisAgent:
     async def run_forever(self):
         self.client = httpx.AsyncClient(
             timeout=45.0,
-            headers={"User-Agent": "Ashvattha/1.0 (universal genealogy project; https://ashvattha.onrender.com)"},
+            headers={"User-Agent": "Ashvattha/1.0 (universal genealogy; https://ashvattha.onrender.com)"},
             follow_redirects=True
         )
-        logger.info("🌱 Ashvattha Agent awakened — growing forever")
+        logger.info("🌱 Ashvattha Agent awakened")
         await self.seed_initial_persons()
-
         while True:
             try:
                 if self.consecutive_failures >= 5:
-                    logger.warning(f"⏸️  Backing off {RETRY_DELAY}s after {self.consecutive_failures} failures")
+                    logger.warning(f"⏸️  Backing off {RETRY_DELAY}s")
                     await asyncio.sleep(RETRY_DELAY)
                     self.consecutive_failures = 0
-
                 processed = await self.process_next()
                 if processed:
                     self.consecutive_failures = 0
@@ -129,64 +116,92 @@ class GenesisAgent:
                 else:
                     await self.refill_queue()
                     await asyncio.sleep(10)
-
             except Exception as e:
                 logger.error(f"Agent loop error: {e}")
                 self.consecutive_failures += 1
                 await asyncio.sleep(15)
 
-    # ── QUEUE MANAGEMENT ────────────────────────────────────────────────────
+    # ── QUEUE ────────────────────────────────────────────────────────────────
 
     async def refill_queue(self):
-        """Keep the queue alive — reset failed, add expansion seeds, cycle."""
         failed_count = (await self.db(
             "SELECT COUNT(*) as c FROM agent_queue WHERE status='failed'", fetch="one") or {}).get("c", 0)
         if failed_count > 0:
             await self.db("UPDATE agent_queue SET status='pending', attempts=0 WHERE status='failed'", fetch="none")
             logger.info(f"♻️  Reset {failed_count} failed jobs")
             return
-
         if self.expansion_index < len(EXPANSION_SEEDS):
             name, ptype = EXPANSION_SEEDS[self.expansion_index]
             self.expansion_index += 1
             existing = await self.db("SELECT id FROM persons WHERE LOWER(name)=LOWER(:n)", {"n": name}, "one")
             if not existing:
-                count = (await self.db("SELECT COUNT(*) as c FROM persons WHERE is_genesis=TRUE", fetch="one") or {}).get("c", 0)
-                gc = f"G{count + 1}"
+                # BUG FIX: new persons are NOT genesis — they just don't have a known father yet
+                # is_genesis=FALSE, genesis_code=NULL — will only become genesis if father is unknown after research
                 row = await self.db(
-                    "INSERT INTO persons (name,type,is_genesis,genesis_code) VALUES (:n,:t,TRUE,:g) RETURNING id",
-                    {"n": name, "t": ptype, "g": gc}, "one")
+                    "INSERT INTO persons (name,type,is_genesis,genesis_code) VALUES (:n,:t,FALSE,NULL) RETURNING id",
+                    {"n": name, "t": ptype}, "one")
                 if row:
                     await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',85)",
                                   {"p": row["id"]}, "none")
                     logger.info(f"🌱 Expansion: {name}")
             else:
-                await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',85)",
-                              {"p": existing["id"]}, "none")
+                # Already exists — just re-queue for more research
+                existing_q = await self.db(
+                    "SELECT id FROM agent_queue WHERE person_id=:p AND status='pending'",
+                    {"p": existing["id"]}, "one")
+                if not existing_q:
+                    await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',85)",
+                                  {"p": existing["id"]}, "none")
         else:
             unresearched = await self.db(
                 "SELECT id FROM persons WHERE agent_researched=FALSE AND type!='genesis' LIMIT 20", fetch="all")
             if unresearched:
                 for p in unresearched:
-                    await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',30)",
-                                  {"p": p["id"]}, "none")
+                    existing_q = await self.db(
+                        "SELECT id FROM agent_queue WHERE person_id=:p AND status='pending'",
+                        {"p": p["id"]}, "one")
+                    if not existing_q:
+                        await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',30)",
+                                      {"p": p["id"]}, "none")
             else:
                 self.expansion_index = 0
-                logger.info("🔄 Full cycle complete — restarting")
+                logger.info("🔄 Full cycle — restarting expansion")
 
     async def seed_initial_persons(self):
         for name, ptype in SEEDS:
             existing = await self.db("SELECT id FROM persons WHERE LOWER(name)=LOWER(:n)", {"n": name}, "one")
             if not existing:
-                count = (await self.db("SELECT COUNT(*) as c FROM persons WHERE is_genesis=TRUE", fetch="one") or {}).get("c", 0)
-                gc = f"G{count + 1}"
+                # Seeds get genesis_code only if they truly have no known parent.
+                # Seeds like Zeus DO have a known parent (Cronus) — agent will discover and remove genesis flag.
+                # For now mark is_genesis=TRUE so they appear as open roots until agent connects them.
                 row = await self.db(
                     "INSERT INTO persons (name,type,is_genesis,genesis_code) VALUES (:n,:t,TRUE,:g) RETURNING id",
-                    {"n": name, "t": ptype, "g": gc}, "one")
+                    {"n": name, "t": ptype, "g": f"G-{name[:4].upper()}"}, "one")
                 if row:
+                    pid = row["id"]
                     await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',90)",
-                                  {"p": row["id"]}, "none")
+                                  {"p": pid}, "none")
+                    # Assign known categories immediately at seed time
+                    await self.assign_seed_categories(pid, name, ptype)
                     logger.info(f"🌱 Seeded: {name}")
+            else:
+                # Already exists — ensure categories are assigned
+                await self.assign_seed_categories(existing["id"], name, ptype)
+
+    async def assign_seed_categories(self, person_id: int, name: str, ptype: str):
+        """Assign categories to seeded persons immediately, don't wait for research."""
+        cats_to_assign = list(TYPE_CATEGORY_MAP.get(name, []))
+
+        # Also assign based on type
+        if ptype == "mythological" and not cats_to_assign:
+            cats_to_assign.append("Mythological")
+        elif ptype == "human" and not cats_to_assign:
+            cats_to_assign.append("Human")
+
+        for cat_name in cats_to_assign:
+            await self.assign_category(person_id, cat_name)
+
+    # ── PROCESS ──────────────────────────────────────────────────────────────
 
     async def process_next(self) -> bool:
         job = await self.db(
@@ -202,13 +217,12 @@ class GenesisAgent:
             return True
 
         logger.info(f"🔍 [{person['type']}] {person['name']}")
-        discoveries = await self.research_person(person)
+        discoveries = await self.research_person(person["name"], person.get("wikidata_id"))
 
         if discoveries and (discoveries.get("father") or discoveries.get("mother") or discoveries.get("children")):
             await self.save_discoveries(person, discoveries)
             await self.db("UPDATE persons SET agent_researched=TRUE WHERE id=:id", {"id": person["id"]}, "none")
             await self.db("UPDATE agent_queue SET status='done' WHERE id=:id", {"id": job["id"]}, "none")
-            logger.info(f"✅ {person['name']} — f:{bool(discoveries.get('father'))} m:{bool(discoveries.get('mother'))} c:{len(discoveries.get('children',[]))}")
         else:
             attempts = (job.get("attempts") or 0) + 1
             status = "failed" if attempts >= MAX_ATTEMPTS else "pending"
@@ -216,114 +230,89 @@ class GenesisAgent:
                           {"s": status, "a": attempts, "id": job["id"]}, "none")
             if status == "failed":
                 self.consecutive_failures += 1
+                # BUG FIX: if agent couldn't find a father after MAX_ATTEMPTS,
+                # THEN mark as genesis (unknown father) — not before
+                has_father = await self.db(
+                    "SELECT id FROM relationships WHERE child_id=:id AND parent_type='father'",
+                    {"id": job["person_id"]}, "one")
+                if not has_father:
+                    current = await self.db("SELECT is_genesis FROM persons WHERE id=:id",
+                                           {"id": job["person_id"]}, "one")
+                    if current and not current["is_genesis"]:
+                        count = (await self.db("SELECT COUNT(*) as c FROM persons WHERE is_genesis=TRUE",
+                                               fetch="one") or {}).get("c", 0)
+                        gc = f"G{count + 1}"
+                        await self.db("UPDATE persons SET is_genesis=TRUE, genesis_code=:gc WHERE id=:id",
+                                      {"gc": gc, "id": job["person_id"]}, "none")
+                        logger.info(f"⬡ {person['name']} → genesis {gc} (no father found)")
             else:
                 await asyncio.sleep(min(attempts * 8, 60))
         return True
 
-    # ── MULTI-SOURCE RESEARCH ORCHESTRATOR ──────────────────────────────────
+    # ── RESEARCH ─────────────────────────────────────────────────────────────
 
-    async def research_person(self, person: Dict) -> Optional[Dict]:
-        """
-        Try multiple sources in priority order, merge results.
-        Sources: Wikidata → DBpedia → Wikipedia → Theoi (if mythological) → Sacred-Texts
-        """
-        name = person["name"]
-        ptype = person.get("type", "human")
-        wikidata_id = person.get("wikidata_id")
+    async def research_person(self, name: str, wikidata_id=None) -> Optional[Dict]:
         merged = {"father": None, "mother": None, "children": [],
                   "birth_year": None, "source_url": None, "auto_categories": []}
 
-        # 1. Wikidata (most structured, highest confidence)
+        # Source 1: Wikidata
         try:
             if not wikidata_id:
                 wikidata_id = await self.find_wikidata_id(name)
             if wikidata_id:
                 wd = await self.fetch_wikidata(wikidata_id)
                 if wd:
-                    self._merge_into(merged, wd, boost=0)
+                    self._merge(merged, wd)
         except Exception as e:
-            logger.warning(f"Wikidata failed for {name}: {e}")
+            logger.warning(f"Wikidata error for {name}: {e}")
 
-        # 2. DBpedia (structured, cross-validates Wikidata)
+        # Source 2: DBpedia (cross-validates, finds gaps)
         try:
             dbp = await self.fetch_dbpedia(name)
             if dbp:
-                self._merge_into(merged, dbp, boost=-5)  # slightly lower confidence
+                self._merge(merged, dbp, confidence_offset=-5)
         except Exception as e:
-            logger.warning(f"DBpedia failed for {name}: {e}")
+            logger.warning(f"DBpedia error for {name}: {e}")
 
-        # 3. Wikipedia infobox (text fallback)
+        # Source 3: Wikipedia infobox fallback
         if not merged["father"] and not merged["mother"] and not merged["children"]:
             try:
                 wiki = await self.fetch_wikipedia(name)
                 if wiki:
-                    self._merge_into(merged, wiki, boost=-10)
+                    self._merge(merged, wiki, confidence_offset=-10)
             except Exception as e:
-                logger.warning(f"Wikipedia failed for {name}: {e}")
-
-        # 4. Theoi.com — Greek mythology specialist (much better than Wikipedia for gods)
-        if ptype == "mythological" and ("greek" in name.lower() or
-                any("Greek" in c for c in merged.get("auto_categories", []))):
-            try:
-                theoi = await self.fetch_theoi(name)
-                if theoi:
-                    self._merge_into(merged, theoi, boost=5)  # higher confidence for mythology
-            except Exception as e:
-                logger.warning(f"Theoi failed for {name}: {e}")
-
-        # 5. Wikisource — biblical/ancient genealogies
-        if any(kw in name.lower() for kw in ["adam","noah","abraham","isaac","jacob","moses","david","solomon"]) or \
-           any(c in merged.get("auto_categories",[]) for c in ["Biblical Figures","Vedic Figures","Quranic Figures"]):
-            try:
-                ws = await self.fetch_wikisource_genealogy(name)
-                if ws:
-                    self._merge_into(merged, ws, boost=8)  # ancient texts = high confidence
-            except Exception as e:
-                logger.warning(f"Wikisource failed for {name}: {e}")
+                logger.warning(f"Wikipedia error for {name}: {e}")
 
         return merged if (merged["father"] or merged["mother"] or merged["children"]) else None
 
-    def _merge_into(self, target: Dict, source: Dict, boost: float = 0):
-        """Merge source discoveries into target, adjusting confidence by boost."""
-        # Father: take highest confidence
+    def _merge(self, target: Dict, source: Dict, confidence_offset: float = 0):
+        """Merge source into target — best confidence wins."""
         if source.get("father"):
             f = dict(source["father"])
-            f["confidence"] = min(99.0, f.get("confidence", 70) + boost)
+            f["confidence"] = min(99.0, f.get("confidence", 70) + confidence_offset)
             if not target["father"] or f["confidence"] > target["father"]["confidence"]:
                 target["father"] = f
-
-        # Mother: same
         if source.get("mother"):
             m = dict(source["mother"])
-            m["confidence"] = min(99.0, m.get("confidence", 70) + boost)
+            m["confidence"] = min(99.0, m.get("confidence", 70) + confidence_offset)
             if not target["mother"] or m["confidence"] > target["mother"]["confidence"]:
                 target["mother"] = m
-
-        # Children: add new ones, update confidence on existing
         existing_names = {c["name"].lower() for c in target["children"]}
         for child in source.get("children", []):
             c = dict(child)
-            c["confidence"] = min(99.0, c.get("confidence", 65) + boost)
+            c["confidence"] = min(99.0, c.get("confidence", 65) + confidence_offset)
             if c["name"].lower() not in existing_names:
                 target["children"].append(c)
                 existing_names.add(c["name"].lower())
-
-        # Birth year — take any
         if source.get("birth_year") and not target["birth_year"]:
             target["birth_year"] = source["birth_year"]
-
-        # Source URL — keep first
         if source.get("source_url") and not target["source_url"]:
             target["source_url"] = source["source_url"]
-
-        # Categories — union
+        if source.get("wikidata_id") and not target.get("wikidata_id"):
+            target["wikidata_id"] = source["wikidata_id"]
         for cat in source.get("auto_categories", []):
             if cat not in target["auto_categories"]:
                 target["auto_categories"].append(cat)
-
-        # Wikidata ID
-        if source.get("wikidata_id") and not target.get("wikidata_id"):
-            target["wikidata_id"] = source["wikidata_id"]
 
     # ── SOURCE 1: WIKIDATA ───────────────────────────────────────────────────
 
@@ -338,8 +327,9 @@ class GenesisAgent:
                 return None
             for result in r.json().get("search", []):
                 desc = result.get("description", "").lower()
-                if any(k in desc for k in ["human","person","deity","god","king","emperor",
-                                            "pharaoh","ruler","queen","prince","prophet","mythological"]):
+                if any(k in desc for k in ["human", "person", "deity", "god", "king",
+                                            "emperor", "pharaoh", "ruler", "queen",
+                                            "prince", "prophet", "mythological", "figure"]):
                     return result["id"]
             results = r.json().get("search", [])
             return results[0]["id"] if results else None
@@ -350,14 +340,14 @@ class GenesisAgent:
     async def fetch_wikidata(self, qid: str) -> Optional[Dict]:
         query = f"""
         SELECT ?father ?fatherLabel ?mother ?motherLabel ?child ?childLabel
-               ?birthYear ?article WHERE {{
+               ?birthYear ?article ?occupation ?occupationLabel WHERE {{
           OPTIONAL {{ wd:{qid} wdt:P22 ?father. }}
           OPTIONAL {{ wd:{qid} wdt:P25 ?mother. }}
           OPTIONAL {{ ?child wdt:P22 wd:{qid}. }}
           OPTIONAL {{ ?child wdt:P25 wd:{qid}. }}
           OPTIONAL {{ wd:{qid} wdt:P569 ?dob. BIND(YEAR(?dob) AS ?birthYear) }}
-          OPTIONAL {{ ?article schema:about wd:{qid};
-                       schema:isPartOf <https://en.wikipedia.org/> . }}
+          OPTIONAL {{ ?article schema:about wd:{qid}; schema:isPartOf <https://en.wikipedia.org/> . }}
+          OPTIONAL {{ wd:{qid} wdt:P106 ?occupation. }}
           SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
         }} LIMIT 60"""
         try:
@@ -376,7 +366,8 @@ class GenesisAgent:
                  "children": [], "birth_year": None,
                  "source_url": f"https://www.wikidata.org/wiki/{qid}",
                  "auto_categories": []}
-            seen = set()
+            seen_children = set()
+            occupation_text = ""
             for row in bindings:
                 if row.get("fatherLabel") and not d["father"]:
                     fn = row["fatherLabel"]["value"]
@@ -392,14 +383,18 @@ class GenesisAgent:
                             "confidence": 90.0}
                 if row.get("childLabel"):
                     cn = row["childLabel"]["value"]
-                    if cn not in seen and not cn.startswith("Q") and len(cn) > 1:
-                        seen.add(cn)
+                    if cn not in seen_children and not cn.startswith("Q") and len(cn) > 1:
+                        seen_children.add(cn)
                         d["children"].append({"name": cn,
                             "wikidata_id": row["child"]["value"].split("/")[-1] if row.get("child") else None,
                             "confidence": 88.0})
                 if row.get("birthYear") and not d["birth_year"]:
                     try: d["birth_year"] = int(row["birthYear"]["value"])
                     except: pass
+                if row.get("occupationLabel"):
+                    occupation_text += " " + row["occupationLabel"]["value"].lower()
+            # Detect categories from occupations too
+            d["auto_categories"] = self._detect_cats(occupation_text)
             return d
         except Exception as e:
             logger.error(f"Wikidata SPARQL failed {qid}: {e}")
@@ -408,11 +403,6 @@ class GenesisAgent:
     # ── SOURCE 2: DBPEDIA ────────────────────────────────────────────────────
 
     async def fetch_dbpedia(self, name: str) -> Optional[Dict]:
-        """
-        DBpedia mirrors Wikipedia as structured RDF.
-        Uses different properties than Wikidata — good for cross-validation.
-        """
-        # DBpedia uses underscored resource names
         resource = name.replace(" ", "_")
         query = f"""
         PREFIX dbo: <http://dbpedia.org/ontology/>
@@ -434,9 +424,7 @@ class GenesisAgent:
             ?child rdfs:label ?childName .
             FILTER(LANG(?childName) = 'en')
           }}
-          OPTIONAL {{
-            dbr:{resource} dbo:birthYear ?birthYear .
-          }}
+          OPTIONAL {{ dbr:{resource} dbo:birthYear ?birthYear . }}
         }} LIMIT 40"""
         try:
             r = await self.client.get(DBPEDIA_SPARQL,
@@ -512,104 +500,7 @@ class GenesisAgent:
             logger.error(f"Wikipedia failed {name}: {e}")
             return None
 
-    # ── SOURCE 4: THEOI.COM (Greek mythology specialist) ────────────────────
-
-    async def fetch_theoi(self, name: str) -> Optional[Dict]:
-        """
-        Theoi.com is the most accurate Greek mythology genealogy source.
-        Has structured family trees for all major deities and heroes.
-        """
-        try:
-            # Search theoi for the deity
-            search_url = f"{THEOI_BASE}/greek-mythology/{name.replace(' ', '').lower()}.html"
-            r = await self.client.get(search_url)
-            if r.status_code != 200:
-                # Try alternate URL format
-                search_url = f"{THEOI_BASE}/Olympios/{name.replace(' ', '')}.html"
-                r = await self.client.get(search_url)
-            if r.status_code != 200:
-                return None
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            d = {"father": None, "mother": None, "children": [],
-                 "source_url": search_url, "auto_categories": ["Greek Gods"]}
-
-            # Theoi lists parents and children in structured sections
-            text = soup.get_text()
-            # Look for "PARENTS" section
-            parent_match = re.search(r'PARENTS?\s*\n([^\n]+)\n', text, re.IGNORECASE)
-            if parent_match:
-                parent_text = parent_match.group(1)
-                # Usually "Father X and Mother Y" or "X & Y"
-                father_m = re.search(r'(?:father|sire)[:\s]+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)', parent_text, re.IGNORECASE)
-                mother_m = re.search(r'(?:mother|dam)[:\s]+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)', parent_text, re.IGNORECASE)
-                if father_m:
-                    d["father"] = {"name": father_m.group(1), "confidence": 88.0}
-                if mother_m:
-                    d["mother"] = {"name": mother_m.group(1), "confidence": 86.0}
-
-            return d if (d["father"] or d["mother"] or d["children"]) else None
-        except Exception as e:
-            logger.warning(f"Theoi failed for {name}: {e}")
-            return None
-
-    # ── SOURCE 5: WIKISOURCE (biblical/ancient genealogies) ─────────────────
-
-    async def fetch_wikisource_genealogy(self, name: str) -> Optional[Dict]:
-        """
-        Wikisource has complete biblical genealogies, royal chronicles,
-        and ancient genealogical texts. Very high confidence for biblical figures.
-        """
-        try:
-            # Search Wikisource for genealogy pages
-            r = await self.client.get(WIKISOURCE_API, params={
-                "action": "query",
-                "list": "search",
-                "srsearch": f"{name} genealogy lineage",
-                "format": "json",
-                "srlimit": 3
-            })
-            if r.status_code != 200:
-                return None
-            results = r.json().get("query", {}).get("search", [])
-            if not results:
-                return None
-
-            # Fetch the most relevant page
-            page_title = results[0]["title"]
-            r2 = await self.client.get(WIKISOURCE_API, params={
-                "action": "query", "titles": page_title,
-                "prop": "revisions", "rvprop": "content",
-                "rvslots": "main", "format": "json", "formatversion": "2"
-            })
-            pages = r2.json().get("query", {}).get("pages", [])
-            if not pages or pages[0].get("missing"):
-                return None
-
-            content = pages[0].get("revisions", [{}])[0].get("slots", {}).get("main", {}).get("content", "")
-
-            # Look for "begat" patterns (biblical genealogy)
-            begat_pattern = rf'{re.escape(name)}\s+begat\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)'
-            begat_matches = re.findall(begat_pattern, content, re.IGNORECASE)
-
-            father_pattern = rf'son of\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)'
-            father_match = re.search(father_pattern, content, re.IGNORECASE)
-
-            d = {"father": None, "mother": None, "children": [],
-                 "source_url": f"https://en.wikisource.org/wiki/{page_title.replace(' ','_')}",
-                 "auto_categories": ["Biblical Figures"]}
-
-            if father_match:
-                d["father"] = {"name": father_match.group(1), "confidence": 91.0}
-            for child_name in begat_matches[:10]:
-                d["children"].append({"name": child_name, "confidence": 89.0})
-
-            return d if (d["father"] or d["children"]) else None
-        except Exception as e:
-            logger.warning(f"Wikisource failed for {name}: {e}")
-            return None
-
-    # ── HELPERS ─────────────────────────────────────────────────────────────
+    # ── HELPERS ──────────────────────────────────────────────────────────────
 
     def _extract_infobox(self, content, fields):
         for f in fields:
@@ -635,7 +526,24 @@ class GenesisAgent:
         tl = text.lower()
         return [cat for cat, kws in CATEGORY_KEYWORDS.items() if any(k in tl for k in kws)]
 
-    # ── SAVE TO DB ──────────────────────────────────────────────────────────
+    async def assign_category(self, person_id: int, cat_name: str):
+        """BUG FIX: use COUNT(*) as c instead of SELECT 1 — pg8000 needs named columns."""
+        cat = await self.db("SELECT id FROM categories WHERE name=:n", {"n": cat_name}, "one")
+        if not cat:
+            return
+        # FIX: was "SELECT 1 FROM..." which pg8000 can't handle — use COUNT with alias
+        existing = (await self.db(
+            "SELECT COUNT(*) as c FROM person_categories WHERE person_id=:p AND category_id=:c",
+            {"p": person_id, "c": cat["id"]}, "one") or {}).get("c", 0)
+        if existing == 0:
+            try:
+                await self.db("INSERT INTO person_categories (person_id,category_id) VALUES (:p,:c)",
+                              {"p": person_id, "c": cat["id"]}, "none")
+                logger.info(f"🏷️  Assigned category '{cat_name}' to person {person_id}")
+            except Exception as e:
+                logger.warning(f"Category assign error: {e}")
+
+    # ── SAVE ─────────────────────────────────────────────────────────────────
 
     async def save_discoveries(self, person, d):
         pid = person["id"]
@@ -651,15 +559,9 @@ class GenesisAgent:
             await self.link_parent(pid, d["mother"], "mother", d.get("source_url"))
         for child in d.get("children", []):
             await self.link_child(pid, child, d.get("source_url"))
+        # Assign detected categories using the fixed assign_category method
         for cat_name in d.get("auto_categories", []):
-            cat = await self.db("SELECT id FROM categories WHERE name=:n", {"n": cat_name}, "one")
-            if cat:
-                existing_pc = await self.db(
-                    "SELECT 1 as x FROM person_categories WHERE person_id=:p AND category_id=:c",
-                    {"p": pid, "c": cat["id"]}, "one")
-                if not existing_pc:
-                    await self.db("INSERT INTO person_categories (person_id,category_id) VALUES (:p,:c)",
-                                  {"p": pid, "c": cat["id"]}, "none")
+            await self.assign_category(pid, cat_name)
         await self.db(
             "INSERT INTO agent_log (person_id,person_name,action,detail) VALUES (:p,:n,'discovered',:d)",
             {"p": pid, "n": person["name"],
@@ -672,14 +574,9 @@ class GenesisAgent:
         if not parent_id or parent_id == child_id:
             return
         existing_primary = await self.db(
-            "SELECT id,confidence FROM relationships WHERE child_id=:c AND parent_type=:t AND is_primary=TRUE",
+            "SELECT id FROM relationships WHERE child_id=:c AND parent_type=:t AND is_primary=TRUE",
             {"c": child_id, "t": parent_type}, "one")
         is_primary = existing_primary is None
-        # If new data has higher confidence, promote it
-        if existing_primary and parent_data["confidence"] > (existing_primary.get("confidence") or 0):
-            await self.db("UPDATE relationships SET is_primary=FALSE, is_branch=TRUE WHERE id=:id",
-                          {"id": existing_primary["id"]}, "none")
-            is_primary = True
         try:
             existing_rel = await self.db(
                 "SELECT id FROM relationships WHERE child_id=:c AND parent_id=:p AND parent_type=:t",
@@ -693,39 +590,36 @@ class GenesisAgent:
                     INSERT INTO relationships (child_id,parent_id,parent_type,confidence,is_primary,is_branch)
                     VALUES (:c,:p,:t,:conf,:prim,:branch) RETURNING id""",
                     {"c": child_id, "p": parent_id, "t": parent_type,
-                     "conf": parent_data["confidence"], "prim": is_primary, "branch": not is_primary}, "one")
+                     "conf": parent_data["confidence"],
+                     "prim": is_primary, "branch": not is_primary}, "one")
                 rel_id = row["id"] if row else None
-
             if source_url and rel_id:
                 existing_src = await self.db(
-                    "SELECT id FROM sources WHERE relationship_id=:r AND url=:u",
+                    "SELECT COUNT(*) as c FROM sources WHERE relationship_id=:r AND url=:u",
                     {"r": rel_id, "u": source_url}, "one")
-                if not existing_src:
+                if (existing_src or {}).get("c", 0) == 0:
+                    src_type = ("wikidata" if "wikidata" in source_url else
+                                "dbpedia" if "dbpedia" in source_url else "wikipedia")
                     await self.db("INSERT INTO sources (relationship_id,url,source_type) VALUES (:r,:u,:t)",
-                                  {"r": rel_id, "u": source_url,
-                                   "t": "wikidata" if "wikidata" in source_url else
-                                        "dbpedia" if "dbpedia" in source_url else
-                                        "wikisource" if "wikisource" in source_url else
-                                        "wikipedia"}, "none")
-
-            # Genesis merge check
+                                  {"r": rel_id, "u": source_url, "t": src_type}, "none")
+            # BUG FIX: only merge genesis if the person was a genesis node
+            # AND now has a confirmed parent — this correctly removes genesis status
             if parent_data["confidence"] >= 95.0:
                 child = await self.db("SELECT * FROM persons WHERE id=:id", {"id": child_id}, "one")
                 if child and child["is_genesis"]:
-                    await self.db("UPDATE persons SET is_genesis=FALSE,genesis_code=NULL WHERE id=:id",
+                    await self.db("UPDATE persons SET is_genesis=FALSE, genesis_code=NULL WHERE id=:id",
                                   {"id": child_id}, "none")
                     await self.db("""INSERT INTO merge_log
                         (genesis_person_id,genesis_code,merged_into_person_id,confidence_at_merge)
                         VALUES (:gp,:gc,:mi,:conf)""",
                         {"gp": child_id, "gc": child["genesis_code"],
                          "mi": parent_id, "conf": parent_data["confidence"]}, "none")
-                    logger.info(f"🔗 MERGE: {child['name']} dissolved")
-
-            # Queue parent for research
+                    logger.info(f"🔗 MERGE: {child['name']} — father found, genesis dissolved")
+            # Queue parent for research too
             existing_q = await self.db(
-                "SELECT id FROM agent_queue WHERE person_id=:p AND status='pending'",
+                "SELECT COUNT(*) as c FROM agent_queue WHERE person_id=:p AND status='pending'",
                 {"p": parent_id}, "one")
-            if not existing_q:
+            if (existing_q or {}).get("c", 0) == 0:
                 await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',75)",
                               {"p": parent_id}, "none")
         except Exception as e:
@@ -751,15 +645,15 @@ class GenesisAgent:
                 rel_id = row["id"] if row else None
             if source_url and rel_id:
                 existing_src = await self.db(
-                    "SELECT id FROM sources WHERE relationship_id=:r AND url=:u",
+                    "SELECT COUNT(*) as c FROM sources WHERE relationship_id=:r AND url=:u",
                     {"r": rel_id, "u": source_url}, "one")
-                if not existing_src:
+                if (existing_src or {}).get("c", 0) == 0:
                     await self.db("INSERT INTO sources (relationship_id,url,source_type) VALUES (:r,:u,'wikipedia')",
                                   {"r": rel_id, "u": source_url}, "none")
             existing_q = await self.db(
-                "SELECT id FROM agent_queue WHERE person_id=:p AND status='pending'",
+                "SELECT COUNT(*) as c FROM agent_queue WHERE person_id=:p AND status='pending'",
                 {"p": child_id}, "one")
-            if not existing_q:
+            if (existing_q or {}).get("c", 0) == 0:
                 await self.db("INSERT INTO agent_queue (person_id,direction,priority) VALUES (:p,'both',55)",
                               {"p": child_id}, "none")
         except Exception as e:
@@ -777,12 +671,11 @@ class GenesisAgent:
                               {"w": wikidata_id, "id": row["id"]}, "none")
             return row["id"]
         try:
-            count = (await self.db("SELECT COUNT(*) as c FROM persons WHERE is_genesis=TRUE",
-                                   fetch="one") or {}).get("c", 0)
-            gc = f"G{count + 1}"
+            # BUG FIX: newly discovered persons start with is_genesis=FALSE
+            # They only become genesis if agent exhausts all sources and finds no father
             new_row = await self.db(
-                "INSERT INTO persons (name,wikidata_id,is_genesis,genesis_code,type) VALUES (:n,:w,TRUE,:g,'human') RETURNING id",
-                {"n": name, "w": wikidata_id, "g": gc}, "one")
+                "INSERT INTO persons (name,wikidata_id,is_genesis,genesis_code,type) VALUES (:n,:w,FALSE,NULL,'human') RETURNING id",
+                {"n": name, "w": wikidata_id}, "one")
             if new_row:
                 await self.db(
                     "INSERT INTO agent_log (person_id,person_name,action,detail) VALUES (:p,:n,'discovered','Discovered by agent')",
