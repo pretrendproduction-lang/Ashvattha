@@ -39,8 +39,8 @@ def run_query(sql, params=None, fetch="all"):
     conn = pg8000.native.Connection(**cfg, ssl_context=ssl)
     try:
         result = conn.run(sql, **(params or {}))
+        # pg8000 native Connection auto-commits — no conn.commit() needed/available
         columns = [c["name"] for c in conn.columns] if conn.columns else []
-        conn.commit()
         if fetch == "none":
             return None
         rows = [dict(zip(columns, row)) for row in (result or [])]
@@ -61,19 +61,21 @@ def auto_init_db():
     try:
         cfg = dict(DB_PARAMS)
         ssl = cfg.pop("ssl_context", None)
-        conn = pg8000.native.Connection(**cfg, ssl_context=ssl)
+
+        def make_conn():
+            return pg8000.native.Connection(**cfg, ssl_context=ssl)
 
         # Check if persons table exists
+        conn = make_conn()
         result = conn.run("""
             SELECT COUNT(*) FROM information_schema.tables
             WHERE table_schema='public' AND table_name='persons'
         """)
         exists = result[0][0] if result else 0
-        conn.commit()
+        conn.close()
 
         if exists:
             print("✅ Database already initialized")
-            conn.close()
             return
 
         print("🔧 First run — initializing database...")
@@ -82,13 +84,14 @@ def auto_init_db():
         with open(schema_path, "r") as f:
             schema = f.read()
 
-        # Execute statement by statement
+        # Execute statement by statement, each in its own connection
         statements = [s.strip() for s in schema.split(';')
                       if s.strip() and not s.strip().startswith('--')]
         for stmt in statements:
             try:
-                conn.run(stmt)
-                conn.commit()
+                c = make_conn()
+                c.run(stmt)
+                c.close()
             except Exception as e:
                 msg = str(e).lower()
                 if "already exists" in msg or "duplicate" in msg:
@@ -96,7 +99,6 @@ def auto_init_db():
                 else:
                     print(f"⚠️  Schema warning: {str(e)[:80]}")
 
-        conn.close()
         print("✅ Database initialized successfully!")
 
     except Exception as e:
@@ -268,6 +270,7 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/")
+@app.head("/")
 async def serve_frontend():
     index = os.path.join(FRONTEND_DIR, "index.html")
     if os.path.exists(index):
