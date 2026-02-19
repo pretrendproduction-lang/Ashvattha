@@ -84,9 +84,26 @@ def auto_init_db():
         with open(schema_path, "r") as f:
             schema = f.read()
 
-        # Execute statement by statement, each in its own connection
-        statements = [s.strip() for s in schema.split(';')
-                      if s.strip() and not s.strip().startswith('--')]
+        # Parse statements: split by ; then strip leading comment-only lines.
+        # CREATE TABLE blocks start with "-- ───" section headers which cause
+        # the naive startswith('--') filter to skip them entirely!
+        raw_parts = schema.split(';')
+        statements = []
+        for part in raw_parts:
+            lines = part.split('\n')
+            sql_lines = []
+            found_sql = False
+            for line in lines:
+                stripped = line.strip()
+                if not found_sql:
+                    if stripped and not stripped.startswith('--'):
+                        found_sql = True
+                        sql_lines.append(line)
+                else:
+                    sql_lines.append(line)
+            sql = '\n'.join(sql_lines).strip()
+            if sql:
+                statements.append(sql)
         for stmt in statements:
             try:
                 c = make_conn()
