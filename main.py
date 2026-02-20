@@ -39,8 +39,8 @@ def run_query(sql, params=None, fetch="all"):
     conn = pg8000.native.Connection(**cfg, ssl_context=ssl)
     try:
         result = conn.run(sql, **(params or {}))
-        # pg8000 native Connection auto-commits — no conn.commit() needed/available
         columns = [c["name"] for c in conn.columns] if conn.columns else []
+        conn.commit()
         if fetch == "none":
             return None
         rows = [dict(zip(columns, row)) for row in (result or [])]
@@ -61,21 +61,19 @@ def auto_init_db():
     try:
         cfg = dict(DB_PARAMS)
         ssl = cfg.pop("ssl_context", None)
-
-        def make_conn():
-            return pg8000.native.Connection(**cfg, ssl_context=ssl)
+        conn = pg8000.native.Connection(**cfg, ssl_context=ssl)
 
         # Check if persons table exists
-        conn = make_conn()
         result = conn.run("""
             SELECT COUNT(*) FROM information_schema.tables
             WHERE table_schema='public' AND table_name='persons'
         """)
         exists = result[0][0] if result else 0
-        conn.close()
+        conn.commit()
 
         if exists:
             print("✅ Database already initialized")
+            conn.close()
             return
 
         print("🔧 First run — initializing database...")
@@ -84,31 +82,13 @@ def auto_init_db():
         with open(schema_path, "r") as f:
             schema = f.read()
 
-        # Parse statements: split by ; then strip leading comment-only lines.
-        # CREATE TABLE blocks start with "-- ───" section headers which cause
-        # the naive startswith('--') filter to skip them entirely!
-        raw_parts = schema.split(';')
-        statements = []
-        for part in raw_parts:
-            lines = part.split('\n')
-            sql_lines = []
-            found_sql = False
-            for line in lines:
-                stripped = line.strip()
-                if not found_sql:
-                    if stripped and not stripped.startswith('--'):
-                        found_sql = True
-                        sql_lines.append(line)
-                else:
-                    sql_lines.append(line)
-            sql = '\n'.join(sql_lines).strip()
-            if sql:
-                statements.append(sql)
+        # Execute statement by statement
+        statements = [s.strip() for s in schema.split(';')
+                      if s.strip() and not s.strip().startswith('--')]
         for stmt in statements:
             try:
-                c = make_conn()
-                c.run(stmt)
-                c.close()
+                conn.run(stmt)
+                conn.commit()
             except Exception as e:
                 msg = str(e).lower()
                 if "already exists" in msg or "duplicate" in msg:
@@ -116,6 +96,7 @@ def auto_init_db():
                 else:
                     print(f"⚠️  Schema warning: {str(e)[:80]}")
 
+        conn.close()
         print("✅ Database initialized successfully!")
 
     except Exception as e:
@@ -124,19 +105,27 @@ def auto_init_db():
 app = FastAPI(title="Ashvattha")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-_agent_started = False
+_agents_started = False
 
 @app.on_event("startup")
 async def startup():
-    global _agent_started
-    # Auto-init DB on first deploy
+    global _agents_started
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(executor, auto_init_db)
-    # Start the agent
-    from agent import GenesisAgent
-    asyncio.create_task(GenesisAgent(db).run_forever())
-    _agent_started = True
-    print("✅ Ashvattha Agent started")
+
+    from agents.research_agent import ResearchAgent
+    from agents.category_agent import CategoryAgent
+    from agents.enrichment_agent import EnrichmentAgent
+
+    # Agent 1: discovers parents & children (runs every 5s)
+    asyncio.create_task(ResearchAgent(db).start())
+    # Agent 2: fixes categories & wrong genesis flags (runs every 15s)
+    asyncio.create_task(CategoryAgent(db).start())
+    # Agent 3: enriches birth years, gender, era details (runs every 30s)
+    asyncio.create_task(EnrichmentAgent(db).start())
+
+    _agents_started = True
+    print("✅ All 3 Ashvattha agents started")
 
 # ── MODELS ──
 class PersonCreate(BaseModel):
@@ -287,7 +276,6 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/")
-@app.head("/")
 async def serve_frontend():
     index = os.path.join(FRONTEND_DIR, "index.html")
     if os.path.exists(index):
@@ -298,15 +286,19 @@ async def serve_frontend():
 
 @app.post("/api/agent/trigger")
 async def trigger_agent():
-    """Manually trigger the agent — useful when shell is unavailable (e.g. Render free tier)."""
-    global _agent_started
-    if _agent_started:
+    """Manually restart agents if needed."""
+    global _agents_started
+    if _agents_started:
         queue_count = (await db("SELECT COUNT(*) as c FROM agent_queue WHERE status='pending'", fetch="one") or {}).get("c", 0)
-        return {"status": "Agent already running", "queue_pending": queue_count}
-    from agent import GenesisAgent
-    asyncio.create_task(GenesisAgent(db).run_forever())
-    _agent_started = True
-    return {"status": "Agent started successfully"}
+        return {"status": "Agents already running", "queue_pending": queue_count}
+    from agents.research_agent import ResearchAgent
+    from agents.category_agent import CategoryAgent
+    from agents.enrichment_agent import EnrichmentAgent
+    asyncio.create_task(ResearchAgent(db).start())
+    asyncio.create_task(CategoryAgent(db).start())
+    asyncio.create_task(EnrichmentAgent(db).start())
+    _agents_started = True
+    return {"status": "All 3 agents started"}
 
 @app.get("/api/agent/status")
 async def agent_status():
@@ -316,7 +308,7 @@ async def agent_status():
     queue_done = (await db("SELECT COUNT(*) as c FROM agent_queue WHERE status='done'", fetch="one") or {}).get("c", 0)
     last_activity = await db("SELECT action, person_name, detail, logged_at FROM agent_log ORDER BY logged_at DESC LIMIT 1", fetch="one")
     return {
-        "agent_running": _agent_started,
+        "agent_running": _agents_started,
         "queue_pending": queue_pending,
         "queue_processing": queue_processing,
         "queue_done": queue_done,
