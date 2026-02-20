@@ -1,7 +1,14 @@
 import os
+import sys
 import asyncio
 import pg8000.native
 from concurrent.futures import ThreadPoolExecutor
+
+# Ensure the directory containing this file is on the path
+# so 'agents' sub-package is always importable
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -36,11 +43,11 @@ executor = ThreadPoolExecutor(max_workers=4)
 def run_query(sql, params=None, fetch="all"):
     cfg = dict(DB_PARAMS)
     ssl = cfg.pop("ssl_context", None)
+    # pg8000 native Connection: autocommit by default, no .commit() needed
     conn = pg8000.native.Connection(**cfg, ssl_context=ssl)
     try:
         result = conn.run(sql, **(params or {}))
         columns = [c["name"] for c in conn.columns] if conn.columns else []
-        conn.commit()
         if fetch == "none":
             return None
         rows = [dict(zip(columns, row)) for row in (result or [])]
@@ -61,15 +68,14 @@ def auto_init_db():
     try:
         cfg = dict(DB_PARAMS)
         ssl = cfg.pop("ssl_context", None)
+        # pg8000 native Connection is autocommit — no .commit() needed
         conn = pg8000.native.Connection(**cfg, ssl_context=ssl)
 
-        # Check if persons table exists
         result = conn.run("""
             SELECT COUNT(*) FROM information_schema.tables
             WHERE table_schema='public' AND table_name='persons'
         """)
         exists = result[0][0] if result else 0
-        conn.commit()
 
         if exists:
             print("✅ Database already initialized")
@@ -82,13 +88,11 @@ def auto_init_db():
         with open(schema_path, "r") as f:
             schema = f.read()
 
-        # Execute statement by statement
         statements = [s.strip() for s in schema.split(';')
                       if s.strip() and not s.strip().startswith('--')]
         for stmt in statements:
             try:
                 conn.run(stmt)
-                conn.commit()
             except Exception as e:
                 msg = str(e).lower()
                 if "already exists" in msg or "duplicate" in msg:
